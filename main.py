@@ -32,7 +32,10 @@ app = FastAPI(title="FDJ Virtuel API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Pour ton site React
+    allow_origins=[
+        "https://fdj-frontend-3hhi48lwk-wesleys-projects-950691c3.vercel.app",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
