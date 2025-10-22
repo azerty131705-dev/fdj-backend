@@ -9,7 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 # ---------------- CONFIG ----------------
 # Webhooks distincts pour éviter tout mélange
 SPORTS_WEBHOOK_URL = "https://discord.com/api/webhooks/1430538864941862993/QqxcVkODQN1IGFz7T3JeHV9P_BKRUnxhVK8fV20UhK_akN7IeExI0SQqITB44-uEFN-N"
-SCRATCH_WEBHOOK_URL = "https://discord.com/api/webhooks/1430541861399040130/OqZL0EAgKvCaPWQoiDpwaczzlWkxcIHjLR1XV4s4HNfvfTWCHywSk2yud0jwl-ILrO4h"
+LOTO_WEBHOOK_URL = "https://discord.com/api/webhooks/1430541861399040130/OqZL0EAgKvCaPWQoiDpwaczzlWkxcIHjLR1XV4s4HNfvfTWCHywSk2yud0jwl-ILrO4h"
+
+
 
 API_KEY = "455364ce5710e315f3722a903b97c785"
 REGIONS = "eu"
