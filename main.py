@@ -4,7 +4,7 @@ import json
 import asyncio
 from datetime import datetime
 import pytz
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -13,108 +13,76 @@ SPORTS_WEBHOOK_URL = "https://discord.com/api/webhooks/1430538864941862993/QqxcV
 PROGRAMME_WEBHOOK_URL = "https://discord.com/api/webhooks/1430658587520405604/__2rMnHl2re1Cinw10uuKzCCJnI6NBL30Wh2aCfClQaMrkUHPVWFWODdGcRMaFl6jmrb"
 
 TIMEZONE = pytz.timezone("Europe/Paris")
-CRON_TOKEN = os.environ.get("CRON_TOKEN", "change-me")  # mets une valeur secrète en prod
-
-# Keywords pour filtrer les compétitions ScoreBat
-COMP_FILTERS = [
-    "LIGUE 1", "LA LIGA", "PRIMEIRA LIGA",  # on garde LA LIGA
-    "PREMIER LEAGUE",
-    "CHAMPIONS LEAGUE", "UEFA CHAMPIONS",
-    "BUNDESLIGA",
-]
+SCOREBAT_URL = "https://www.scorebat.com/video-api/v3/"
 
 # ---------------- FASTAPI ----------------
 app = FastAPI(title="FDJ Virtuel API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # mets ton domaine si tu veux restreindre
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def _now_paris():
-    return datetime.now(TIMEZONE)
-
-def _fmt_hhmm(dt: datetime) -> str:
-    return dt.astimezone(TIMEZONE).strftime("%H:%M")
-
-# ----------- FETCH MATCHES (ScoreBat) -----------
+# ----------- FETCH MATCHES FROM SCOREBAT -----------
 async def fetch_todays_matches():
     matches = []
-    today = datetime.now(TIMEZONE).date()
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    async with aiohttp.ClientSession() as session:
-        for comp_name, sport_key in SPORTS.items():
-            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-            params = {"apiKey": API_KEY, "regions": "eu", "markets": "h2h"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(SCOREBAT_URL) as resp:
+                data = await resp.json()
+    except Exception as e:
+        print(f"❌ Erreur API ScoreBat : {e}")
+        return []
 
-            try:
-                async with session.get(url, params=params) as resp:
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-            except:
-                continue
+    if "response" not in data:
+        return []
 
-            for ev in data:
-                start_time = ev.get("commence_time")
-                if not start_time:
-                    continue
+    for match in data["response"]:
+        match_date = match.get("date", "").split("T")[0]
+        if match_date != today:
+            continue
 
-                dt = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(TIMEZONE)
+        competition = match["competition"]["name"]
 
-                # On garde seulement les matchs d'aujourd'hui
-                if dt.date() != today:
-                    continue
+        if " - " not in match["title"]:
+            continue
+        home, away = match["title"].split(" - ")
 
-                odds = {"Match Nul": "—"}
-                try:
-                    market = ev["bookmakers"][0]["markets"][0]["outcomes"]
-                    for o in market:
-                        odds[o["name"]] = o["price"]
-                except:
-                    pass
+        matches.append({
+            "competition": competition,
+            "home_team": home,
+            "away_team": away,
+            "start_time": "À venir",
+            "odds": {
+                home: 1.50,
+                "Match Nul": 3.20,
+                away: 2.60,
+            }
+        })
 
-                matches.append({
-                    "competition": comp_name,
-                    "home_team": ev["home_team"],
-                    "away_team": ev["away_team"],
-                    "start_time": dt.strftime("%H:%M"),
-                    "odds": odds
-                })
-
-    print(f"✅ {len(matches)} matchs trouvés pour aujourd’hui.")
+    print(f"✅ {len(matches)} matchs trouvés aujourd’hui.")
     return matches
 
-# ----------- API GET MATCHES -----------
+
+# ----------- API ENDPOINT -----------
 @app.get("/api/matches")
 async def get_matches():
-    matches = await fetch_todays_matches()
-    # message de fallback explicite si vide
-    if not matches:
-        return []
-    return matches
+    return await fetch_todays_matches()
+
 
 # ----------- PARIS SPORTIFS -----------
 @app.post("/api/bet")
 async def post_bet(bet: dict):
-    username = (bet.get("username") or "inconnu").strip()[:64]
+    username = bet.get("username", "inconnu")
     selections = bet.get("selections", [])
-    try:
-        stake = float(bet.get("stake", 0))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Stake invalide")
+    stake = float(bet.get("stake", 0))
 
-    if not selections:
-        raise HTTPException(status_code=400, detail="Aucune sélection")
-
-    # Somme (comme voulu)
-    try:
-        total_odds = sum(float(s.get("odd", 1)) for s in selections)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Cote invalide")
+    total_odds = sum(float(s.get("odd", 1)) for s in selections)
     potential_gain = round(stake * total_odds, 2)
 
     lines = [
@@ -127,84 +95,41 @@ async def post_bet(bet: dict):
     ]
 
     for s in selections:
-        choice = s.get("choice", "")
-        if str(choice).lower() == "draw":
-            choice = "Match Nul"
-        lines.append(
-            f"• {s.get('home_team','?')} 🆚 {s.get('away_team','?')} — *{choice}* (cote {s.get('odd','?')})"
-        )
+        lines.append(f"• {s['home_team']} vs {s['away_team']} — *{s['choice']}* (cote {s['odd']})")
 
     content = "\n".join(lines)
 
     try:
         async with aiohttp.ClientSession() as session:
-            r = await session.post(SPORTS_WEBHOOK_URL, json={"content": content}, timeout=15)
-            if r.status >= 300:
-                txt = await r.text()
-                print(f"⚠️ Webhook pari status {r.status}: {txt}")
-    except Exception as e:
-        print(f"❌ Erreur webhook pari : {e}")
+            await session.post(SPORTS_WEBHOOK_URL, json={"content": content})
+    except:
+        pass
 
-    return {
-        "status": "ok",
-        "message": f"Pari envoyé sur Discord pour {username}",
-        "total_odds": round(total_odds, 2),
-        "potential_gain": potential_gain
-    }
+    return {"status": "ok"}
 
-# ----------- ENVOI AUTOMATIQUE DU PROGRAMME -----------
+
+# ----------- AUTO PROGRAMME (10H) -----------
 async def send_daily_matches_to_discord():
     matches = await fetch_todays_matches()
 
     if not matches:
-        content = "⚽ Aucun match prévu aujourd’hui. Revenez demain."
+        content = "⚽ Aucun match prévu aujourd’hui."
     else:
-        lines = ["📅 **Programme du jour**"]
-        current_comp = None
+        lines = ["📅 **Programme du jour :**\n"]
+        current_comp = ""
         for m in matches:
             if m["competition"] != current_comp:
                 current_comp = m["competition"]
                 lines.append(f"\n🏆 **{current_comp}**")
-            odds = m["odds"]
-            home = odds.get(m["home_team"], "—")
-            draw = odds.get("Match Nul", "—")
-            away = odds.get(m["away_team"], "—")
-            lines.append(
-                f"• {m['home_team']} 🆚 {m['away_team']} — 🕒 {m['start_time']}\n"
-                f"  💰 Cotes : 🏠 {home} | 🤝 {draw} | 🚗 {away}"
-            )
+            lines.append(f"• {m['home_team']} vs {m['away_team']} — 🕒 {m['start_time']}")
         content = "\n".join(lines)
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            r = await session.post(PROGRAMME_WEBHOOK_URL, json={"content": content}, timeout=15)
-            if r.status >= 300:
-                txt = await r.text()
-                print(f"⚠️ Webhook programme status {r.status}: {txt}")
-            else:
-                print("✅ Programme du jour envoyé sur Discord.")
-    except Exception as e:
-        print(f"❌ Erreur envoi programme : {e}")
+    async with aiohttp.ClientSession() as session:
+        await session.post(PROGRAMME_WEBHOOK_URL, json={"content": content})
 
-# ----------- CRON ENDPOINT (fallback si scheduler ne tourne pas) -----------
-@app.get("/cron/send_programme")
-async def cron_send_programme(token: str = Query(..., description="Token de sécurité")):
-    if token != CRON_TOKEN:
-        raise HTTPException(status_code=403, detail="Token invalide")
-    await send_daily_matches_to_discord()
-    return {"status": "ok", "sent": True}
 
-# ----------- HEALTHCHECK -----------
-@app.get("/")
-def root():
-    return {"ok": True, "time": _now_paris().isoformat()}
+scheduler = BackgroundScheduler(timezone="Europe/Paris")
+scheduler.add_job(lambda: asyncio.run(send_daily_matches_to_discord()), "cron", hour=10, minute=0)
+scheduler.start()
 
-# ----------- PLANNING AUTO 10H -----------
-# Évite double démarrage sur certains hébergeurs (gunicorn/uvicorn workers)
-if not os.environ.get("DISABLE_SCHEDULER", "").lower() in ("1", "true", "yes"):
-    scheduler = BackgroundScheduler(timezone="Europe/Paris")
-    # Appel asynchrone propre
-    scheduler.add_job(lambda: asyncio.run(send_daily_matches_to_discord()),
-                      "cron", hour=10, minute=0)
-    scheduler.start()
-    print("🕒 Scheduler OK : Envoi automatique tous les jours à 10h.")
+print("🕒 Scheduler OK — envoi chaque jour à 10h")
