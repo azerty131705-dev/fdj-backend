@@ -45,56 +45,43 @@ app.add_middleware(
 # ----------- FETCH MATCHES FROM API -----------
 async def fetch_todays_matches():
     matches = []
-    today = datetime.now(TIMEZONE).date()
+    today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-    async with aiohttp.ClientSession() as session:
-        for comp_name, sport_key in SPORTS.items():
-            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-            params = {
-                "apiKey": API_KEY,
-                "regions": "eu",
-                "markets": "h2h",
-                "bookmakers": "bet365",
-                "dateFormat": "iso"
-            }
+    url = "https://www.scorebat.com/video-api/v3/"
 
-            try:
-                async with session.get(url, params=params) as resp:
-                    if resp.status != 200:
-                        print(f"❌ API {comp_name}: HTTP {resp.status}")
-                        continue
-                    data = await resp.json()
-            except Exception as e:
-                print(f"❌ Erreur API {comp_name}: {e}")
-                continue
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+    except Exception as e:
+        print(f"❌ Erreur ScoreBat API: {e}")
+        return []
 
-            for ev in data:
-                try:
-                    start_time = ev.get("commence_time")
-                    if not start_time:
-                        continue
+    if "response" not in data:
+        print("⚠️ API ScoreBat ne contient pas 'response'")
+        return []
 
-                    dt_local = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(TIMEZONE)
+    for match in data["response"]:
+        # Filtrer les matchs du jour
+        if match["matchviewUrl"].startswith("https") and match["competition"] and match["title"]:
+            match_date = match.get("date", "").split("T")[0]
+            if match_date == today:
+                home, away = match["title"].split(" - ")
+                matches.append({
+                    "competition": match["competition"],
+                    "home_team": home,
+                    "away_team": away,
+                    "start_time": "À venir",
+                    "odds": {
+                        home: 1.0,
+                        "Match Nul": 1.0,
+                        away: 1.0
+                    }
+                })
 
-                    if dt_local.date() != today:
-                        continue
-
-                    outcomes = ev["bookmakers"][0]["markets"][0]["outcomes"]
-                    odds = {o["name"]: o["price"] for o in outcomes}
-
-                    matches.append({
-                        "competition": comp_name,
-                        "home_team": ev["home_team"],
-                        "away_team": ev["away_team"],
-                        "start_time": dt_local.strftime("%H:%M"),
-                        "odds": odds
-                    })
-
-                except Exception:
-                    continue
-
-    print(f"✅ {len(matches)} match(s) trouvés aujourd’hui.")
+    print(f"✅ {len(matches)} matchs trouvés pour aujourd’hui.")
     return matches
+
 
 
 # ----------- ROUTE : MATCHS DU JOUR -----------
