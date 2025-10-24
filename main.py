@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # CONFIG
 # =========================
 # → Mets ta clé The Odds API dans la variable d'environnement THE_ODDS_API_KEY sur Render
-API_KEY = os.getenv("455364ce5710e315f3722a903b97c785", "").strip()
+API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
 REGIONS = "eu"
 MARKETS = "h2h"
 TIMEZONE = pytz.timezone("Europe/Paris")
