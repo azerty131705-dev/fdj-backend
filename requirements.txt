@@ -1,4 +1,5 @@
 fastapi
-uvicorn[standard]
+uvicorn
 aiohttp
 pytz
+apscheduler
