@@ -42,72 +42,50 @@ def _fmt_hhmm(dt: datetime) -> str:
 
 # ----------- FETCH MATCHES (ScoreBat) -----------
 async def fetch_todays_matches():
-    today_str = _now_paris().strftime("%Y-%m-%d")
-    url = "https://www.scorebat.com/video-api/v3/"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=20) as resp:
-                if resp.status != 200:
-                    print(f"❌ ScoreBat status {resp.status}")
-                    return []
-                data = await resp.json()
-    except Exception as e:
-        print(f"❌ Erreur API ScoreBat : {e}")
-        return []
-
-    if "response" not in data:
-        print("⚠️ ScoreBat: pas de clé 'response'")
-        return []
-
     matches = []
-    for m in data["response"]:
-        # Competition
-        comp_name = ""
-        try:
-            comp_name = m["competition"]["name"] or ""
-        except Exception:
-            comp_name = ""
+    today = datetime.now(TIMEZONE).date()
 
-        comp_upper = comp_name.upper()
-        if not any(k in comp_upper for k in COMP_FILTERS):
-            # saute les compétitions qui ne nous intéressent pas
-            continue
+    async with aiohttp.ClientSession() as session:
+        for comp_name, sport_key in SPORTS.items():
+            url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+            params = {"apiKey": API_KEY, "regions": "eu", "markets": "h2h"}
 
-        # Date match (UTC)
-        raw_date = m.get("date") or ""
-        if "T" not in raw_date:
-            continue
-        try:
-            dt_utc = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-        except Exception:
-            continue
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+            except:
+                continue
 
-        # On ne garde que les matchs du jour (Paris)
-        if dt_utc.astimezone(TIMEZONE).strftime("%Y-%m-%d") != today_str:
-            continue
+            for ev in data:
+                start_time = ev.get("commence_time")
+                if not start_time:
+                    continue
 
-        title = m.get("title") or ""
-        if " - " not in title:
-            continue
+                dt = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(TIMEZONE)
 
-        home, away = title.split(" - ", 1)
+                # On garde seulement les matchs d'aujourd'hui
+                if dt.date() != today:
+                    continue
 
-        matches.append({
-            "competition": comp_name,
-            "home_team": home.strip(),
-            "away_team": away.strip(),
-            "start_time": _fmt_hhmm(dt_utc),
-            "odds": {
-                home.strip(): 1.50,
-                "Match Nul": 3.20,
-                away.strip(): 2.60,
-            }
-        })
+                odds = {"Match Nul": "—"}
+                try:
+                    market = ev["bookmakers"][0]["markets"][0]["outcomes"]
+                    for o in market:
+                        odds[o["name"]] = o["price"]
+                except:
+                    pass
 
-    # Tri: par compétition puis par heure
-    matches.sort(key=lambda x: (x["competition"], x["start_time"]))
-    print(f"✅ {len(matches)} match(s) trouvés pour aujourd’hui.")
+                matches.append({
+                    "competition": comp_name,
+                    "home_team": ev["home_team"],
+                    "away_team": ev["away_team"],
+                    "start_time": dt.strftime("%H:%M"),
+                    "odds": odds
+                })
+
+    print(f"✅ {len(matches)} matchs trouvés pour aujourd’hui.")
     return matches
 
 # ----------- API GET MATCHES -----------
