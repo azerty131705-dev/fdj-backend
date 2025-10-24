@@ -1,23 +1,23 @@
 import os
 import aiohttp
 import json
+import asyncio
 from datetime import datetime
 import pytz
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ---------------- CONFIG ----------------
 # Webhooks distincts pour éviter tout mélange
 SPORTS_WEBHOOK_URL = "https://discord.com/api/webhooks/1430538864941862993/QqxcVkODQN1IGFz7T3JeHV9P_BKRUnxhVK8fV20UhK_akN7IeExI0SQqITB44-uEFN-N"
+PROGRAMME_WEBHOOK_URL = "https://discord.com/api/webhooks/1430658587520405604/__2rMnHl2re1Cinw10uuKzCCJnI6NBL30Wh2aCfClQaMrkUHPVWFWODdGcRMaFl6jmrb"
 LOTO_WEBHOOK_URL = "https://discord.com/api/webhooks/1430541861399040130/OqZL0EAgKvCaPWQoiDpwaczzlWkxcIHjLR1XV4s4HNfvfTWCHywSk2yud0jwl-ILrO4h"
-
-
 
 API_KEY = "455364ce5710e315f3722a903b97c785"
 REGIONS = "eu"
 MARKETS = "h2h"
 TIMEZONE = pytz.timezone("Europe/Paris")
-SCRATCH_FILE = "scratch_entries.json"
 
 SPORTS = {
     "🇫🇷 Ligue 1": "soccer_france_ligue_one",
@@ -41,6 +41,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ----------- FETCH MATCHES FROM API -----------
 async def fetch_todays_matches():
     matches = []
@@ -49,15 +50,22 @@ async def fetch_todays_matches():
     async with aiohttp.ClientSession() as session:
         for comp_name, sport_key in SPORTS.items():
             url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
-            params = {"apiKey": API_KEY, "regions": REGIONS, "markets": MARKETS}
+            params = {
+                "apiKey": API_KEY,
+                "regions": "eu",
+                "markets": "h2h",
+                "bookmakers": "bet365",
+                "dateFormat": "iso"
+            }
 
             try:
-                async with session.get(url, params=params, timeout=15) as resp:
+                async with session.get(url, params=params) as resp:
                     if resp.status != 200:
+                        print(f"❌ API {comp_name}: HTTP {resp.status}")
                         continue
                     data = await resp.json()
             except Exception as e:
-                print(f"Erreur {comp_name} : {e}")
+                print(f"❌ Erreur API {comp_name}: {e}")
                 continue
 
             for ev in data:
@@ -66,8 +74,8 @@ async def fetch_todays_matches():
                     if not start_time:
                         continue
 
-                    # Convertir en heure locale
                     dt_local = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(TIMEZONE)
+
                     if dt_local.date() != today:
                         continue
 
@@ -81,16 +89,17 @@ async def fetch_todays_matches():
                         "start_time": dt_local.strftime("%H:%M"),
                         "odds": odds
                     })
+
                 except Exception:
                     continue
 
+    print(f"✅ {len(matches)} match(s) trouvés aujourd’hui.")
     return matches
 
 
 # ----------- ROUTE : MATCHS DU JOUR -----------
 @app.get("/api/matches")
 async def get_matches():
-    """Renvoie uniquement les matchs d'aujourd'hui."""
     data = await fetch_todays_matches()
     return data
 
@@ -98,16 +107,13 @@ async def get_matches():
 # ----------- ROUTE : PARI SPORTIF -----------
 @app.post("/api/bet")
 async def post_bet(bet: dict):
-    """Enregistre un pari virtuel et l'envoie sur Discord."""
     username = bet.get("username", "inconnu")
     selections = bet.get("selections", [])
     stake = float(bet.get("stake", 0))
 
-    # Calcul de la cote totale et du gain potentiel
     total_odds = sum(float(s.get("odd", 1)) for s in selections)
     potential_gain = round(stake * total_odds, 2)
 
-    # 🔹 Message pour Discord
     lines = [
         f"🎟️ **NOUVEAU PARI** — {username}",
         f"💶 **Mise** : {stake:.2f} €",
@@ -116,17 +122,15 @@ async def post_bet(bet: dict):
         "",
         "**Sélections :**"
     ]
-    
+
     for s in selections:
         choice = s["choice"]
-        # 🟡 Traduction du mot "Draw"
         if choice.lower() == "draw":
             choice = "Match Nul"
         lines.append(f"• {s['home_team']} 🆚 {s['away_team']} — *{choice}* (cote {s['odd']})")
 
     content = "\n".join(lines)
 
-    # 🔸 Envoi sur le bon Webhook Discord
     try:
         async with aiohttp.ClientSession() as session:
             await session.post(SPORTS_WEBHOOK_URL, json={"content": content})
@@ -141,60 +145,47 @@ async def post_bet(bet: dict):
         "potential_gain": potential_gain
     }
 
-# ----------- ROUTE : LOTO -----------
 
-LOTO_FILE = "loto_entries.json"
-LOTO_WEBHOOK_URL = "https://discord.com/api/webhooks/1430541861399040130/OqZL0EAgKvCaPWQoiDpwaczzlWkxcIHjLR1XV4s4HNfvfTWCHywSk2yud0jwl-ILrO4h"
+# ==========================================================
+# AUTO-ENVOI QUOTIDIEN DU PROGRAMME DANS DISCORD (10H)
+# ==========================================================
+async def send_daily_matches_to_discord():
+    print("🕙 Envoi automatique du programme du jour...")
 
+    matches = await fetch_todays_matches()
 
-@app.post("/api/loto")
-async def post_loto(entry: dict):
-    """Inscrit un joueur au tirage LOTO du jour (1 participation max par jour)."""
-    username = entry.get("username", "inconnu")
-    numbers = entry.get("numbers", [])
-    chance = entry.get("chance", None)
+    if not matches:
+        content = "⚽ Aucun match prévu aujourd’hui."
+    else:
+        lines = ["📅 **Programme du jour :**\n"]
+        current_competition = None
+        for m in matches:
+            if m["competition"] != current_competition:
+                current_competition = m["competition"]
+                lines.append(f"\n🏆 **{current_competition}**")
+            odds = m["odds"]
+            home = odds.get(m["home_team"], "—")
+            draw = odds.get("Draw", "—")
+            away = odds.get(m["away_team"], "—")
+            lines.append(
+                f"• {m['home_team']} 🆚 {m['away_team']} — 🕒 {m['start_time']}\n"
+                f"  💰 Cotes : 🏠 {home} | 🤝 {draw} | 🚗 {away}"
+            )
+        content = "\n".join(lines)
 
-    tz = pytz.timezone("Europe/Paris")
-    today = datetime.now(tz).strftime("%Y-%m-%d")
-
-    if not isinstance(numbers, list) or len(numbers) != 5 or not isinstance(chance, int):
-        return {"status": "error", "message": "Format invalide. 5 numéros + 1 numéro chance requis."}
-
-    # Charger les participations existantes
-    entries = []
-    if os.path.exists(LOTO_FILE):
-        with open(LOTO_FILE, "r", encoding="utf-8") as f:
-            try:
-                entries = json.load(f)
-            except json.JSONDecodeError:
-                entries = []
-
-    # Vérifier si le joueur a déjà joué aujourd’hui
-    if any(e["username"].lower() == username.lower() and e["date"] == today for e in entries):
-        return {"status": "error", "message": "Tu as déjà joué aujourd’hui !"}
-
-    # Sauvegarder la participation
-    new_entry = {
-        "username": username,
-        "numbers": sorted(numbers),
-        "chance": chance,
-        "date": today
-    }
-    entries.append(new_entry)
-    with open(LOTO_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
-
-    # Envoi Discord
-    content = (
-        f"🎟️ **Nouvelle participation au LOTO** — {username}\n"
-        f"🔢 Numéros : {', '.join(map(str, sorted(numbers)))} | 🌟 Chance : {chance}\n"
-        f"📅 Date : {today}"
-    )
     try:
         async with aiohttp.ClientSession() as session:
-            await session.post(LOTO_WEBHOOK_URL, json={"content": content})
-        print(f"✅ LOTO envoyé pour {username}")
+            await session.post(PROGRAMME_WEBHOOK_URL, json={"content": content})
+        print("✅ Programme du jour envoyé sur Discord.")
     except Exception as e:
-        print(f"❌ Erreur webhook LOTO : {e}")
+        print(f"❌ Erreur envoi Discord programme : {e}")
 
-    return {"status": "ok", "message": f"Participation enregistrée pour {username}"}
+
+# ==========================================================
+# PLANIFICATION AUTOMATIQUE À 10H
+# ==========================================================
+scheduler = BackgroundScheduler(timezone="Europe/Paris")
+scheduler.add_job(lambda: asyncio.run(send_daily_matches_to_discord()), "cron", hour=10, minute=0)
+scheduler.start()
+
+print("🕒 Scheduler lancé — le programme sera envoyé chaque jour à 10h.")
