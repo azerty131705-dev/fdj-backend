@@ -106,5 +106,6 @@ async def fetch_todays_matches():
 
 @app.get("/api/matches")
 async def get_matches():
-    return await fetch_matches_today()
+    return await fetch_todays_matches()
+
 
