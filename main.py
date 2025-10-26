@@ -1,20 +1,16 @@
 import aiohttp
-from datetime import datetime
-import pytz
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 API_KEY = "69cfb42b44d7624c8ec3730d66a173f1"
-TIMEZONE = pytz.timezone("Europe/Paris")
+FIXTURES_URL = "https://v3.football.api-sports.io/fixtures"
+ODDS_URL = "https://v3.football.api-sports.io/odds"
 
-LEAGUES = {
-    "🇫🇷 Ligue 1": 61,
-    "🏴 Premier League": 39,
-    "🇪🇸 La Liga": 140,
-    "🇩🇪 Bundesliga": 78,
-    "🏆 Ligue des Champions": 2
+LEAGUES = [61, 39, 140, 78, 2]  # Ligue1, EPL, LaLiga, Bundesliga, UCL
+
+HEADERS = {
+    "x-apisports-key": API_KEY
 }
-
 
 app = FastAPI()
 
@@ -25,54 +21,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-async def fetch_matches():
-    # Prend la vraie date du jour à Paris
-    now = datetime.now(TIMEZONE)
-    today = now.strftime("%Y-%m-%d")
 
-    # Saison = année en cours si après juillet, sinon année précédente
-    season = now.year if now.month >= 7 else now.year - 1
-
-    matches = []
+async def fetch_fixtures():
+    upcoming_matches = []
 
     async with aiohttp.ClientSession() as session:
-        headers = {"x-apisports-key": API_KEY}
-
-        for league_name, league_id in LEAGUES.items():
-            url = f"https://v3.football.api-sports.io/fixtures?date={today}&league={league_id}&season={season}"
-
-            async with session.get(url, headers=headers) as resp:
+        for league in LEAGUES:
+            params = {"league": league, "season": 2024, "next": 5}
+            async with session.get(FIXTURES_URL, params=params, headers=HEADERS) as resp:
                 data = await resp.json()
 
-                # ✅ Debug visible dans logs Render
-                print(f"[DEBUG] {league_name}: {data.get('results', 0)} resultats")
-
-                if "response" not in data:
+                if not data.get("response"):
                     continue
 
-                for m in data["response"]:
-                    home = m["teams"]["home"]["name"]
-                    away = m["teams"]["away"]["name"]
+                for match in data["response"]:
+                    home = match["teams"]["home"]["name"]
+                    away = match["teams"]["away"]["name"]
+                    time = match["fixture"]["date"]
 
-                    # Heure format FR
-                    dt = datetime.fromisoformat(m["fixture"]["date"].replace("Z", "+00:00")).astimezone(TIMEZONE)
-                    time = dt.strftime("%H:%M")
+                    # Fetch Odds
+                    odds_params = {
+                        "fixture": match["fixture"]["id"]
+                    }
+                    async with session.get(ODDS_URL, params=odds_params, headers=HEADERS) as odds_resp:
+                        odds_data = await odds_resp.json()
 
-                    matches.append({
-                        "competition": league_name,
+                    home_odd = draw_odd = away_odd = "—"
+
+                    if odds_data.get("response"):
+                        try:
+                            outcomes = odds_data["response"][0]["bookmakers"][0]["bets"][0]["values"]
+                            home_odd = outcomes[0]["odd"]
+                            draw_odd = outcomes[1]["odd"]
+                            away_odd = outcomes[2]["odd"]
+                        except:
+                            pass
+
+                    upcoming_matches.append({
+                        "league": match["league"]["name"],
                         "home_team": home,
                         "away_team": away,
-                        "start_time": time,
+                        "match_time": time,
                         "odds": {
-                            home: "-", 
-                            "Match Nul": "-", 
-                            away: "-"
+                            "home": home_odd,
+                            "draw": draw_odd,
+                            "away": away_odd
                         }
                     })
 
-    print(f"✅ {len(matches)} matchs trouvés aujourd’hui ({today})")
-    return matches
+    return upcoming_matches
+
 
 @app.get("/api/matches")
 async def get_matches():
-    return await fetch_matches()
+    matches = await fetch_fixtures()
+    return matches
