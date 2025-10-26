@@ -25,51 +25,49 @@ app.add_middleware(
 )
 
 # ----------- FETCH MATCHES FROM API-FOOTBALL -----------
-async def fetch_matches_today():
+async def fetch_todays_matches():
+    matches = []
     today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+
+    leagues = [61, 140, 39, 78, 2]  # Ligue 1, La Liga, PL, Bundesliga, LDC
     url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
 
-    matches = []
+    headers = {
+        "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
+        "x-rapidapi-key": "1947393ebfmsh8447824eac2f16dp134efdjsne16437dfdf24"
+    }
 
     async with aiohttp.ClientSession() as session:
-        for league_id in LEAGUES:
+        for league_id in leagues:
             params = {"date": today, "league": league_id, "season": "2024"}
-            headers = {
-                "x-rapidapi-key": RAPID_API_KEY,
-                "x-rapidapi-host": "api-football-v1.p.rapidapi.com"
-            }
 
             try:
                 async with session.get(url, headers=headers, params=params) as resp:
                     data = await resp.json()
-            except Exception:
+            except Exception as e:
+                print(f"❌ Erreur API Football (Ligue {league_id}): {e}")
                 continue
 
-            if "response" not in data:
-                continue
+            if data.get("response"):
+                for match in data["response"]:
+                    home = match["teams"]["home"]["name"]
+                    away = match["teams"]["away"]["name"]
+                    time_utc = match["fixture"]["date"]
+                    local_time = datetime.fromisoformat(time_utc.replace("Z", "+00:00")).astimezone(TIMEZONE)
 
-            for m in data["response"]:
-                home = m["teams"]["home"]["name"]
-                away = m["teams"]["away"]["name"]
-                league = m["league"]["name"]
+                    matches.append({
+                        "competition": match["league"]["name"],
+                        "home_team": home,
+                        "away_team": away,
+                        "start_time": local_time.strftime("%H:%M"),
+                        "odds": {
+                            home: 1.0,
+                            "Match Nul": 1.0,
+                            away: 1.0
+                        }
+                    })
 
-                # Génération de cotes réalistes
-                home_odd = round(random.uniform(1.40, 2.80), 2)
-                draw_odd = round(random.uniform(2.80, 4.20), 2)
-                away_odd = round(random.uniform(1.40, 2.80), 2)
-
-                matches.append({
-                    "competition": league,
-                    "home_team": home,
-                    "away_team": away,
-                    "start_time": m["fixture"]["date"][11:16],  # HH:MM
-                    "odds": {
-                        home: home_odd,
-                        "Match Nul": draw_odd,
-                        away: away_odd,
-                    }
-                })
-
+    print(f"✅ {len(matches)} matchs trouvés aujourd’hui via API-Football.")
     return matches
 
 # ----------- API ENDPOINT -----------
